@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Running Route Roulette</title>
+<meta name="description" content="Pick a distance, spin, and get a random running loop from where you are.">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #181b22;
+    --line: #2a2f3a;
+    --text: #eef0f4;
+    --muted: #9aa3b2;
+    --accent: #ff5a36;
+    --accent-2: #ffb020;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  #app { display: grid; grid-template-columns: 340px 1fr; height: 100%; }
+  aside { background: var(--panel); border-right: 1px solid var(--line); padding: 22px;
+    display: flex; flex-direction: column; gap: 18px; overflow-y: auto; }
+  h1 { margin: 0; font-size: 22px; letter-spacing: -0.02em; }
+  h1 span { color: var(--accent); }
+  .sub { margin: 4px 0 0; color: var(--muted); font-size: 14px; line-height: 1.4; }
+  label { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
+  .row { display: flex; gap: 8px; align-items: center; }
+  .distance { display: flex; align-items: baseline; gap: 6px; }
+  .distance output { font-size: 40px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  .seg button { background: none; border: 0; color: var(--muted); padding: 6px 12px; cursor: pointer; font: inherit; font-size: 13px; }
+  .seg button.on { background: var(--line); color: var(--text); }
+  .btn { border: 0; border-radius: 12px; padding: 14px 16px; font: inherit; font-weight: 700;
+    font-size: 16px; cursor: pointer; transition: transform .08s ease, opacity .2s; }
+  .btn:active { transform: scale(.98); }
+  .btn:disabled { opacity: .5; cursor: wait; }
+  .spin { background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: #160a05; width: 100%; }
+  .ghost { background: transparent; color: var(--text); border: 1px solid var(--line); font-weight: 600; font-size: 14px; padding: 10px 12px; flex: 1; }
+  .status { font-size: 13px; color: var(--muted); min-height: 18px; }
+  .status.err { color: #ff8a8a; }
+  .stats { display: none; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .stats.show { display: grid; }
+  .stat { background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+  .stat b { display: block; font-size: 20px; font-variant-numeric: tabular-nums; }
+  .stat small { color: var(--muted); font-size: 12px; }
+  .hint { font-size: 12px; color: var(--muted); line-height: 1.5; margin-top: auto; }
+  .hint a { color: var(--muted); }
+  #map { height: 100%; width: 100%; }
+  .start-pin { width: 18px; height: 18px; border-radius: 50%; background: var(--accent);
+    border: 3px solid #fff; box-shadow: 0 0 0 4px rgba(255,90,54,.35); }
+  .wheel { display: inline-block; }
+  .spinning .wheel { animation: rot .6s linear infinite; }
+  @keyframes rot { to { transform: rotate(360deg); } }
+  @media (max-width: 760px) {
+    #app { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
+    aside { border-right: 0; border-bottom: 1px solid var(--line); padding: 16px; gap: 12px; }
+    .hint { display: none; }
+    #map { min-height: 55vh; }
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <aside>
+    <div>
+      <h1>Running Route <span>Roulette</span></h1>
+      <p class="sub">Pick a distance, hit spin, and get a random loop that starts and ends where you are.</p>
+    </div>
+
+    <div>
+      <div class="row" style="justify-content: space-between;">
+        <label for="dist">Distance</label>
+        <div class="seg" id="units">
+          <button data-u="mi" class="on">mi</button>
+          <button data-u="km">km</button>
+        </div>
+      </div>
+      <div class="distance"><output id="distOut">3.0</output><span id="unitLbl">mi</span></div>
+      <input id="dist" type="range" min="1" max="15" step="0.5" value="3">
+    </div>
+
+    <button class="btn spin" id="spinBtn"><span class="wheel">🎲</span> Spin a route</button>
+
+    <div class="row">
+      <button class="btn ghost" id="locBtn">📍 Use my location</button>
+      <button class="btn ghost" id="gpxBtn" disabled>⬇ GPX</button>
+    </div>
+
+    <div class="status" id="status">Tap the map to set a start point, or use your location.</div>
+
+    <div class="stats" id="stats">
+      <div class="stat"><b id="sDist">–</b><small>route distance</small></div>
+      <div class="stat"><b id="sTime">–</b><small>at <span id="paceLbl">10:00</span>/<span class="uShort">mi</span></small></div>
+    </div>
+
+    <div class="row">
+      <label for="pace" style="white-space:nowrap">Your pace</label>
+      <input id="pace" type="range" min="300" max="900" step="15" value="600">
+    </div>
+
+    <p class="hint">
+      Routes follow footpaths and streets using OpenStreetMap data. Each spin points a new random direction.
+      Always check the route looks safe before you head out.<br><br>
+      Map © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors ·
+      Routing by <a href="https://routing.openstreetmap.de/about.html" target="_blank" rel="noopener">FOSSGIS OSRM</a>
+    </p>
+  </aside>
+  <div id="map"></div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+(() => {
+  const MI = 1609.344;
+  const ROUTER = "https://routing.openstreetmap.de/routed-foot/route/v1/foot/";
+
+  const $ = (id) => document.getElementById(id);
+  const state = { unit: "mi", start: null, route: null, pace: 600 }; // pace in sec per unit
+
+  // Map
+  const map = L.map("map", { zoomControl: true }).setView([40.7128, -74.006], 13);
+  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    maxZoom: 19, attribution: "© OpenStreetMap contributors"
+  }).addTo(map);
+
+  const startIcon = L.divIcon({ className: "", html: '<div class="start-pin"></div>', iconSize: [18, 18], iconAnchor: [9, 9] });
+  let startMarker = null;
+  let routeLayer = null;
+
+  function setStart(latlng, pan = true) {
+    state.start = latlng;
+    if (startMarker) startMarker.setLatLng(latlng);
+    else startMarker = L.marker(latlng, { icon: startIcon, draggable: true })
+      .addTo(map)
+      .on("dragend", (e) => setStart(e.target.getLatLng(), false));
+    if (pan) map.setView(latlng, Math.max(map.getZoom(), 14));
+    status("Start set. Hit spin!");
+  }
+
+  map.on("click", (e) => setStart(e.latlng, false));
+
+  // Controls
+  function fmtDist(m) {
+    const v = m / (state.unit === "mi" ? MI : 1000);
+    return v.toFixed(2) + " " + state.unit;
+  }
+  function fmtTime(sec) {
+    sec = Math.round(sec);
+    const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+    return h ? `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}` : `${m}:${String(s).padStart(2, "0")}`;
+  }
+  function targetMeters() {
+    return parseFloat($("dist").value) * (state.unit === "mi" ? MI : 1000);
+  }
+  function status(msg, err = false) {
+    const el = $("status");
+    el.textContent = msg;
+    el.classList.toggle("err", err);
+  }
+  function refreshLabels() {
+    $("distOut").textContent = parseFloat($("dist").value).toFixed(1);
+    $("unitLbl").textContent = state.unit;
+    document.querySelectorAll(".uShort").forEach((n) => (n.textContent = state.unit));
+    $("paceLbl").textContent = fmtTime(state.pace);
+    if (state.route) {
+      $("sDist").textContent = fmtDist(state.route.distance);
+      $("sTime").textContent = fmtTime((state.route.distance / (state.unit === "mi" ? MI : 1000)) * state.pace);
+    }
+  }
+
+  $("dist").addEventListener("input", refreshLabels);
+  $("pace").addEventListener("input", (e) => { state.pace = +e.target.value; refreshLabels(); });
+  $("units").addEventListener("click", (e) => {
+    const u = e.target.dataset.u;
+    if (!u || u === state.unit) return;
+    // keep the same physical distance and pace when switching
+    const factor = u === "km" ? MI / 1000 : 1000 / MI;
+    const d = $("dist");
+    if (u === "km") { d.min = 1; d.max = 25; } else { d.min = 1; d.max = 15; }
+    d.value = Math.round(parseFloat(d.value) * factor * 2) / 2;
+    state.pace = Math.round(state.pace / factor);
+    const p = $("pace");
+    if (u === "km") { p.min = 180; p.max = 560; } else { p.min = 300; p.max = 900; }
+    p.value = state.pace;
+    state.unit = u;
+    document.querySelectorAll("#units button").forEach((b) => b.classList.toggle("on", b.dataset.u === u));
+    refreshLabels();
+  });
+
+  $("locBtn").addEventListener("click", locate);
+  function locate() {
+    if (!navigator.geolocation) return status("Your browser can't share location. Tap the map instead.", true);
+    status("Finding you…");
+    navigator.geolocation.getCurrentPosition(
+      (p) => setStart(L.latLng(p.coords.latitude, p.coords.longitude)),
+      () => status("Couldn't get your location. Tap the map to pick a start.", true),
+      { enableHighAccuracy: true, timeout: 10000 }
+    );
+  }
+
+  // Geometry helpers
+  function offset(latlng, meters, bearingDeg) {
+    const R = 6371000, b = (bearingDeg * Math.PI) / 180;
+    const lat1 = (latlng.lat * Math.PI) / 180, lng1 = (latlng.lng * Math.PI) / 180, d = meters / R;
+    const lat2 = Math.asin(Math.sin(lat1) * Math.cos(d) + Math.cos(lat1) * Math.sin(d) * Math.cos(b));
+    const lng2 = lng1 + Math.atan2(Math.sin(b) * Math.sin(d) * Math.cos(lat1), Math.cos(d) - Math.sin(lat1) * Math.sin(lat2));
+    return L.latLng((lat2 * 180) / Math.PI, (lng2 * 180) / Math.PI);
+  }
+
+  // Build a loop: the start sits on a circle; waypoints are spread around that circle.
+  function loopWaypoints(start, radius, heading, n) {
+    const center = offset(start, radius, heading);
+    const back = (heading + 180) % 360; // bearing from center to start
+    const dir = Math.random() < 0.5 ? 1 : -1;
+    const pts = [start];
+    for (let i = 1; i <= n; i++) {
+      const jitter = (Math.random() - 0.5) * (300 / (n + 1)) * 0.5;
+      const r = radius * (0.8 + Math.random() * 0.4);
+      pts.push(offset(center, r, back + dir * (360 * i) / (n + 1) + jitter));
+    }
+    pts.push(start);
+    return pts;
+  }
+
+  async function routeThrough(pts) {
+    const coords = pts.map((p) => `${p.lng.toFixed(6)},${p.lat.toFixed(6)}`).join(";");
+    const url = `${ROUTER}${coords}?overview=full&geometries=geojson&continue_straight=true`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error("Routing service returned " + res.status);
+    const data = await res.json();
+    if (data.code !== "Ok" || !data.routes || !data.routes.length) throw new Error("No route found here");
+    return data.routes[0];
+  }
+
+  async function spin() {
+    if (!state.start) {
+      status("Pick a start point first: tap the map or use your location.", true);
+      return;
+    }
+    const target = targetMeters();
+    const btn = $("spinBtn");
+    btn.disabled = true; btn.classList.add("spinning");
+    status("Spinning…");
+
+    const heading = Math.random() * 360;
+    const n = 3;
+    // Roads wiggle, so the routed loop is longer than the circle. Start with a guess and correct.
+    let radius = target / (2 * Math.PI) / 1.25;
+    let best = null;
+    try {
+      for (let attempt = 0; attempt < 4; attempt++) {
+        const route = await routeThrough(loopWaypoints(state.start, radius, heading, n));
+        const err = Math.abs(route.distance - target) / target;
+        if (!best || err < Math.abs(best.distance - target) / target) best = route;
+        if (err < 0.07) break;
+        radius *= Math.min(1.8, Math.max(0.55, target / route.distance));
+        status(`Tuning distance… (${fmtDist(route.distance)})`);
+      }
+      showRoute(best);
+      const off = Math.abs(best.distance - target) / target;
+      status(off < 0.12 ? "Here's your loop. Not feeling it? Spin again." : "Closest loop I could find nearby. Spin again for another.");
+    } catch (e) {
+      status(e.message + ". Try spinning again or moving the start.", true);
+    } finally {
+      btn.disabled = false; btn.classList.remove("spinning");
+    }
+  }
+
+  function showRoute(route) {
+    state.route = route;
+    if (routeLayer) routeLayer.remove();
+    const latlngs = route.geometry.coordinates.map(([lng, lat]) => [lat, lng]);
+    routeLayer = L.layerGroup([
+      L.polyline(latlngs, { color: "#ffffff", weight: 9, opacity: 0.9 }),
+      L.polyline(latlngs, { color: "#ff5a36", weight: 5, opacity: 1 }),
+    ]).addTo(map);
+    map.fitBounds(L.latLngBounds(latlngs), { padding: [40, 40] });
+    $("stats").classList.add("show");
+    $("gpxBtn").disabled = false;
+    refreshLabels();
+  }
+
+  $("spinBtn").addEventListener("click", spin);
+
+  $("gpxBtn").addEventListener("click", () => {
+    if (!state.route) return;
+    const pts = state.route.geometry.coordinates
+      .map(([lng, lat]) => `      <trkpt lat="${lat.toFixed(6)}" lon="${lng.toFixed(6)}"></trkpt>`).join("\n");
+    const name = `Route Roulette ${fmtDist(state.route.distance)}`;
+    const gpx = `<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="Running Route Roulette" xmlns="http://www.topografix.com/GPX/1/1">
+  <trk>
+    <name>${name}</name>
+    <trkseg>
+${pts}
+    </trkseg>
+  </trk>
+</gpx>`;
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([gpx], { type: "application/gpx+xml" }));
+    a.download = "route-roulette.gpx";
+    a.click();
+    URL.revokeObjectURL(a.href);
+  });
+
+  refreshLabels();
+  locate();
+})();
+</script>
+</body>
+</html>
